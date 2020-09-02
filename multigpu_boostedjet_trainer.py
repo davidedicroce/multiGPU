@@ -3,6 +3,7 @@ np.random.seed(0)
 import os, glob
 import time
 import datetime
+import h5py
 import tensorflow.keras as keras
 import math
 import tensorflow as tf
@@ -23,16 +24,15 @@ if __name__ == '__main__':
     lr_init = args.lr_init
     resblocks = args.resblocks
     epochs = args.epochs
-    expt_name = 'saveBoostedJets-opendata_ResNet_blocks%d_x1_epochs%d'%(resblocks, epochs)
+    expt_name = 'BoostedJets-opendata_ResNet_blocks%d_x1_epochs%d'%(resblocks, epochs)
     expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")
     if len(args.name) > 0:
         expt_name = args.name
-    #FIXME
-    if not os.path.exists('/uscms/home/ccianfar/QCD_Glu_Quark/MODELS/' + expt_name):
-        os.mkdir('/uscms/home/ccianfar/QCD_Glu_Quark/MODELS/' + expt_name) 
+    if not os.path.exists('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name):
+        os.mkdir('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('/storage/local/data1/gpuscratch/ccianfar/highgrantfrecords/*')
+datafile = glob.glob('/storage/local/data1/gpuscratch/ddicroce/tfrecord/x1/*')
 
 # After N batches, will output the loss and accuracy of the last batch tested
 class NBatchLogger(keras.callbacks.Callback):
@@ -72,6 +72,7 @@ test_steps = test_sz // BATCH_SZ
 
 
 channels = [0,1,2,3,4,5,6,7]
+#channels = [0,1,2]
 granularity=1
 
 # Mapping functions used to convert tfrecords to tf dataset
@@ -91,12 +92,12 @@ def extract_fn(data):
 classes = 2
 def map_fn(data):
     # reshapes X_jets, converts y to one-hot array for feeding into keras model
-    x = tf.reshape(data['X_jets'], (125*granularity,125*granularity,8))[...,channels]
+    x = tf.reshape(data['X_jets'], (125*granularity,125*granularity,8))[...,0:8]
     y = tf.one_hot(tf.cast(data['y'], tf.uint8), classes)
     return x, y
 
 def x_fn(data):
-    return tf.reshape(data['X_jets'], (125*granularity,125*granularity,8))[...,channels]
+    return tf.reshape(data['X_jets'], (125*granularity,125*granularity,8))[...,0:8]
 
 def y_fn(data):
     return data['y']
@@ -175,8 +176,7 @@ if __name__ == '__main__':
     with graph.as_default():    
         # Model Callbacks
         print_step = 1000
-        #FIXME
-        checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ccianfar/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
+        checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
         batch_logger = NBatchLogger(display=print_step)
         csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
         lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)

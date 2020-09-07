@@ -246,10 +246,6 @@ if __name__ == '__main__':
     #broadcast `resume_from_epoch` from first process to all others
     resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
 
-    print("Train DATA")
-    print(train_data)
-    print("End of data")
-
     history = resnet.fit(
         train_data,
         #steps_per_epoch=train_sz//BATCH_SZ,

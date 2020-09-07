@@ -8,18 +8,6 @@ import tensorflow.keras as keras
 import math
 import tensorflow as tf
 from sklearn.metrics import roc_curve, auc
-from novograd import NovoGrad
-
-#import Horovod
-import horovod.tensorflow.keras as hvd
-#initialize Horovod
-hvd.init()
-#pin to a GPU
-gpus = tf.config.experimental.list_physical_devices('GPU')
-for gpu in gpus:
-    tf.config.experimental.set_memory_growth(gpu, True)
-if gpus:
-    tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
 
 import argparse
 if __name__ == '__main__':
@@ -30,8 +18,7 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--cuda', default=0, type=int, help='Which gpuid to use.')
     parser.add_argument('-a', '--load_epoch', default=0, type=int, help='Which epoch to start training from')
     parser.add_argument('-s', '--save_dir', default='MODELS', help='Directory with saved weights files')
-    parser.add_argument('-n', '--name', default='', help='Name of experiment')
-    parser.add_argument('--warmup-epochs', type=float, default=5, help='number of warmup epochs')
+    parser.add_argument('-n', '--name', default='', help='Name of experiment') 
     args = parser.parse_args()
     
     lr_init = args.lr_init
@@ -46,13 +33,6 @@ if __name__ == '__main__':
 
 # Path to directory containing TFRecord files
 datafile = glob.glob('/storage/local/data1/gpuscratch/ddicroce/tfrecord/x1/*')
-
-# only set `verbose` to `1` if this is the root worker. Otherwise, it should be zero.
-if hvd.rank() == 0:
-    verbose = 1
-else:
-    verbose = 0
-
 
 # After N batches, will output the loss and accuracy of the last batch tested
 class NBatchLogger(keras.callbacks.Callback):
@@ -71,16 +51,6 @@ def LR_Decay(epoch):
     epochs_drop = 10
     lr = lr_init * math.pow(drop, math.floor((epoch+1)/epochs_drop))
     return lr
-
-def restart_epoch(args):
-
-    epoch = 0
-    for try_epoch in range(args.epochs, 0, -1):
-        if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
-            epoch = try_epoch
-            break
-
-    return epoch
 
 #train_sz = 384000*2 #qg amount in paper
 #valid_sz = 12950 # qg amount in paper
@@ -198,67 +168,28 @@ if __name__ == '__main__':
         #model_name = model_name[0].split('.hdf5')[0]+'.hdf5'
         print('Loading weights from file:', model_name)
         resnet.load_weights(model_name)
-    #opt = keras.optimizers.Adam(lr=lr_init, epsilon=1.e-8) # changed eps to match pytorch value
-    ##Scale the learning rate by the number of workers
-    #opt = keras.optimizers.SGD(lr=lr_init * hvd.size(), momentum=args.momentum)
-    ##use the NovoGrad optimizer instead of SGD
-    opt = NovoGrad(learning_rate=lr_init * hvd.size())
-    #Wrap the optimizer in a Horovod distributed optimizer
-    opt = hvd.DistributedOptimizer(opt)
-    # uses hvd.DistributedOptimizer() to compute gradients.        
-
-    #For Horovod: We specify `experimental_run_tf_function=False` to ensure TensorFlow 
-    resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'], experimental_run_tf_function = False)
-    #resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
+    opt = keras.optimizers.Adam(lr=lr_init, epsilon=1.e-8) # changed eps to match pytorch value
+    resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
     resnet.summary()
     
     #with tf.Session() as sess, graph.as_default():
     with graph.as_default():    
         # Model Callbacks
         print_step = 1000
-        #checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
-        #batch_logger = NBatchLogger(display=print_step)
-        #csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
-        #lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)
-        #callbacks_list=[checkpoint, csv_logger, lr_scheduler]
-
-        callbacks_list = []
- 
-        callback_list.append(NBatchLogger(display=print_step))
-
-        #implement a LR warmup over `args.warmup_epochs`
-        callbacks_list.append(hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=args.warmup_epochs, verbose=verbose))
-        #replace with the Horovod learning rate scheduler, taking care not to start until after warmup is complete
-        callbacks_list.append(hvd.callbacks.LearningRateScheduleCallback(start_epoch=args.warmup_epochs, multiplier=LR_Decay))
-        #broadcast initial variable states from the first worker to all others by adding the broadcast global variables callback.
-        callbacks_list.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
-        #average the metrics among workers at the end of every epoch by adding the metric average callback.
-        callbacks_list.append(hvd.callbacks.MetricAverageCallback())  
-
-        resume_from_epoch = 0
-        if args.use_checkpointing:
-            #checkpointing should only be done on the root worker.
-            if hvd.rank() == 0:
-                callbacks.append(keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False)#, save_weights_only=True)
-                callbacks.append(keras.callbacks.TensorBoard(args.save_dir))
-            resume_from_epoch = restart_epoch(args)
-            #broadcast `resume_from_epoch` from first process to all others
-            resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
+        checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
+        batch_logger = NBatchLogger(display=print_step)
+        csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
+        lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)
+        callbacks_list=[checkpoint, csv_logger, lr_scheduler]
 
         history = resnet.fit(
             train_data,
-            #steps_per_epoch=train_sz//BATCH_SZ,
-            ##keep the total number of steps the same despite of an increased number of workers
-            steps_per_epoch=len(train_data) // hvd.size(), 
+            steps_per_epoch=train_sz//BATCH_SZ,
             epochs=epochs,
             callbacks=callbacks_list,
-            verbose=verbose,
-            workers=4,
-            initial_epoch=resume_from_epoch,
+            verbose=1,
             validation_data=val_data,
             validation_steps=valid_steps,
-            #set this value to be 3 * num_test_iterations / number_of_workers
-            validation_steps=3 * len(test_iter) // hvd.size())
             initial_epoch = args.load_epoch)
         
         #y_iter = test_data[1].make_one_shot_iterator().get_next()

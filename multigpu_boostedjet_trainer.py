@@ -110,12 +110,12 @@ granularity=1
 def extract_fn(data):
     # extracts fields from TFRecordDataset
     feature_description = {
-        'X_jets': tf.FixedLenFeature([125*granularity*125*granularity*8], tf.float32),
-        'm0': tf.FixedLenFeature([], tf.float32), 
-        'pt': tf.FixedLenFeature([], tf.float32),
-        'y': tf.FixedLenFeature([], tf.float32)
+        'X_jets': tf.io.FixedLenFeature([125*granularity*125*granularity*8], tf.float32),
+        'm0': tf.io.FixedLenFeature([], tf.float32), 
+        'pt': tf.io.FixedLenFeature([], tf.float32),
+        'y': tf.io.FixedLenFeature([], tf.float32)
     }
-    sample = tf.parse_single_example(data, feature_description)
+    sample = tf.io.parse_single_example(serialized=data, features=feature_description)
     return sample
 
    
@@ -141,7 +141,7 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
 
     dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=True if is_training else False)
     dataset = dataset.repeat()
-    dataset = dataset.prefetch(tf.contrib.data.AUTOTUNE)
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
     return dataset
 
@@ -150,7 +150,7 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
 def get_dataset(dataset, start, end, batch_sz=32, columns=channels):
     dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=False)
     dataset = dataset.repeat()
-    dataset = dataset.prefetch(tf.contrib.data.AUTOTUNE)
+    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
     return dataset
 
@@ -178,12 +178,12 @@ if __name__ == '__main__':
     val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, columns=channels)
     #test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
 
-    from tensorflow.keras.backend import set_session
-    config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = 0.3
-    sess = tf.Session(config=config)
-    set_session(sess)
-    graph = tf.get_default_graph()
+    #from tensorflow.keras.backend import set_session
+    #config = tf.compat.v1.ConfigProto()
+    #config.gpu_options.per_process_gpu_memory_fraction = 0.3
+    #sess = tf.compat.v1.Session(config=config)
+    #set_session(sess)
+    graph = tf.compat.v1.get_default_graph()
 
     # Build network
     import keras_resnet_single as networks
@@ -213,58 +213,62 @@ if __name__ == '__main__':
     resnet.summary()
     
     #with tf.Session() as sess, graph.as_default():
-    with graph.as_default():    
-        # Model Callbacks
-        print_step = 1000
-        #checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
-        #batch_logger = NBatchLogger(display=print_step)
-        #csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
-        #lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)
-        #callbacks_list=[checkpoint, csv_logger, lr_scheduler]
+    #with graph.as_default():
+    #hooks = [hvd.BroadcastGlobalVariablesHook(0)]
+    #with tf.train.MonitoredTrainingSession(hooks=hook) as sess, graph.as_default():
+    # Model Callbacks
+    print_step = 1000
+    #checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
+    #batch_logger = NBatchLogger(display=print_step)
+    #csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
+    #lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)
+    #callbacks_list=[checkpoint, csv_logger, lr_scheduler]
 
-        callbacks_list = []
+    callbacks_list = []
  
-        callback_list.append(NBatchLogger(display=print_step))
+    #callback_list.append(NBatchLogger(display=print_step))
 
-        #implement a LR warmup over `args.warmup_epochs`
-        callbacks_list.append(hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=args.warmup_epochs, verbose=verbose))
-        #replace with the Horovod learning rate scheduler, taking care not to start until after warmup is complete
-        callbacks_list.append(hvd.callbacks.LearningRateScheduleCallback(start_epoch=args.warmup_epochs, multiplier=LR_Decay))
-        #broadcast initial variable states from the first worker to all others by adding the broadcast global variables callback.
-        callbacks_list.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
-        #average the metrics among workers at the end of every epoch by adding the metric average callback.
-        callbacks_list.append(hvd.callbacks.MetricAverageCallback())  
+    #implement a LR warmup over `args.warmup_epochs`
+    callbacks_list.append(hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=args.warmup_epochs, verbose=verbose))
+    #replace with the Horovod learning rate scheduler, taking care not to start until after warmup is complete
+    callbacks_list.append(hvd.callbacks.LearningRateScheduleCallback(start_epoch=args.warmup_epochs, multiplier=LR_Decay))
+    #broadcast initial variable states from the first worker to all others by adding the broadcast global variables callback.
+    callbacks_list.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
+    #average the metrics among workers at the end of every epoch by adding the metric average callback.
+    callbacks_list.append(hvd.callbacks.MetricAverageCallback())  
 
-        resume_from_epoch = 0
-        #checkpointing should only be done on the root worker.
-        if hvd.rank() == 0:
-            callbacks_list.append(keras.callbacks.ModelCheckpoint('/dli/task/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
-            callbacks_list.append(keras.callbacks.TensorBoard(args.save_dir))
-        resume_from_epoch = restart_epoch(args)
-        #broadcast `resume_from_epoch` from first process to all others
-        resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
+    resume_from_epoch = 0
+    #checkpointing should only be done on the root worker.
+    if hvd.rank() == 0:
+        callbacks_list.append(keras.callbacks.ModelCheckpoint('/dli/task/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
+        callbacks_list.append(keras.callbacks.TensorBoard(args.save_dir))
+    resume_from_epoch = restart_epoch(args)
+    #broadcast `resume_from_epoch` from first process to all others
+    resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
 
-        history = resnet.fit(
-            train_data,
-            #steps_per_epoch=train_sz//BATCH_SZ,
-            ##keep the total number of steps the same despite of an increased number of workers
-            steps_per_epoch=len(train_data) // hvd.size(), 
-            epochs=epochs,
-            callbacks=callbacks_list,
-            verbose=verbose,
-            workers=4,
-            initial_epoch=resume_from_epoch,
-            validation_data=val_data,
-            #validation_steps=valid_steps,
-            #set this value to be 3 * num_test_iterations / number_of_workers
-            validation_steps=3 * len(val_data) // hvd.size())
-            #initial_epoch = args.load_epoch)
-        
-        #y_iter = test_data[1].make_one_shot_iterator().get_next()
-        #y = sess.run(y_iter)
-        #preds = resnet.predict(test_data[0], steps=test_steps, verbose=1)[:,1]
-        #fpr, tpr, _ = roc_curve(y, preds)
-        #roc_auc = auc(fpr, tpr)
-        #print('Test AUC: ' + str(roc_auc))
+    print(len(train_data))
+
+    history = resnet.fit(
+        train_data,
+        #steps_per_epoch=train_sz//BATCH_SZ,
+        ##keep the total number of steps the same despite of an increased number of workers
+        steps_per_epoch=len(train_data) // hvd.size(), 
+        epochs=epochs,
+        callbacks=callbacks_list,
+        verbose=verbose,
+        workers=4,
+        initial_epoch=resume_from_epoch,
+        validation_data=val_data,
+        #validation_steps=valid_steps,
+        #set this value to be 3 * num_test_iterations / number_of_workers
+        validation_steps=3 * len(val_data) // hvd.size())
+        #initial_epoch = args.load_epoch)
+    
+    #y_iter = test_data[1].make_one_shot_iterator().get_next()
+    #y = sess.run(y_iter)
+    #preds = resnet.predict(test_data[0], steps=test_steps, verbose=1)[:,1]
+    #fpr, tpr, _ = roc_curve(y, preds)
+    #roc_auc = auc(fpr, tpr)
+    #print('Test AUC: ' + str(roc_auc))
     print('Network has finished training')
 

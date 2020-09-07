@@ -246,13 +246,15 @@ if __name__ == '__main__':
     #broadcast `resume_from_epoch` from first process to all others
     resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
 
-    print(len(train_data))
+    print("Train DATA")
+    print(train_data)
+    print("End of data")
 
     history = resnet.fit(
         train_data,
         #steps_per_epoch=train_sz//BATCH_SZ,
         ##keep the total number of steps the same despite of an increased number of workers
-        steps_per_epoch=len(train_data) // hvd.size(), 
+        steps_per_epoch=train_sz // hvd.size(), 
         epochs=epochs,
         callbacks=callbacks_list,
         verbose=verbose,
@@ -261,7 +263,7 @@ if __name__ == '__main__':
         validation_data=val_data,
         #validation_steps=valid_steps,
         #set this value to be 3 * num_test_iterations / number_of_workers
-        validation_steps=3 * len(val_data) // hvd.size())
+        validation_steps=3 * valid_sz // hvd.size())
         #initial_epoch = args.load_epoch)
     
     #y_iter = test_data[1].make_one_shot_iterator().get_next()

@@ -41,11 +41,11 @@ if __name__ == '__main__':
     expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")
     if len(args.name) > 0:
         expt_name = args.name
-    if not os.path.exists('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name):
-        os.mkdir('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name) 
+    if not os.path.exists('/dli/task/MODELS/' + expt_name):
+        os.mkdir('/dli/task/MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('/storage/local/data1/gpuscratch/ddicroce/tfrecord/x1/*')
+datafile = glob.glob('/dli/task/tfrecord/*')
 
 # only set `verbose` to `1` if this is the root worker. Otherwise, it should be zero.
 if hvd.rank() == 0:
@@ -236,14 +236,13 @@ if __name__ == '__main__':
         callbacks_list.append(hvd.callbacks.MetricAverageCallback())  
 
         resume_from_epoch = 0
-        if args.use_checkpointing:
-            #checkpointing should only be done on the root worker.
-            if hvd.rank() == 0:
-                callbacks.append(keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False)#, save_weights_only=True)
-                callbacks.append(keras.callbacks.TensorBoard(args.save_dir))
-            resume_from_epoch = restart_epoch(args)
-            #broadcast `resume_from_epoch` from first process to all others
-            resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
+        #checkpointing should only be done on the root worker.
+        if hvd.rank() == 0:
+            callbacks_list.append(keras.callbacks.ModelCheckpoint('/dli/task/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
+            callbacks_list.append(keras.callbacks.TensorBoard(args.save_dir))
+        resume_from_epoch = restart_epoch(args)
+        #broadcast `resume_from_epoch` from first process to all others
+        resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
 
         history = resnet.fit(
             train_data,
@@ -256,10 +255,10 @@ if __name__ == '__main__':
             workers=4,
             initial_epoch=resume_from_epoch,
             validation_data=val_data,
-            validation_steps=valid_steps,
+            #validation_steps=valid_steps,
             #set this value to be 3 * num_test_iterations / number_of_workers
-            validation_steps=3 * len(test_iter) // hvd.size())
-            initial_epoch = args.load_epoch)
+            validation_steps=3 * len(val_data) // hvd.size())
+            #initial_epoch = args.load_epoch)
         
         #y_iter = test_data[1].make_one_shot_iterator().get_next()
         #y = sess.run(y_iter)

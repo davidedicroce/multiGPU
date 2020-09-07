@@ -76,7 +76,7 @@ def restart_epoch(args):
 
     epoch = 0
     for try_epoch in range(args.epochs, 0, -1):
-        if os.path.exists(args.checkpoint_format.format(epoch=try_epoch)):
+        if os.path.exists(expt_name.format(epoch=try_epoch)):
             epoch = try_epoch
             break
 
@@ -85,18 +85,18 @@ def restart_epoch(args):
 #train_sz = 384000*2 #qg amount in paper
 #valid_sz = 12950 # qg amount in paper
 #test_sz = 69653 #qg amount in paper
-
+'''
 BATCH_SZ = 32
 train_sz = 32*81250
 valid_sz = 32*12500
 test_sz = 32*25000
-
 '''
+#'''
 BATCH_SZ = 32
 train_sz = 32 * 500
 valid_sz = 32 * 100
 test_sz = 32 * 100
-'''
+#'''
 valid_steps = valid_sz // BATCH_SZ
 test_steps = test_sz // BATCH_SZ
 

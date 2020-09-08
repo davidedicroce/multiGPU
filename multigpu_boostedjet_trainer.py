@@ -145,6 +145,7 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
     dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=True if is_training else False)
     dataset = dataset.repeat()
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    dataset = dataset.apply(tf.data.experimental.ignore_errors())
 
     return dataset
 
@@ -261,7 +262,8 @@ if __name__ == '__main__':
         train_data,
         #steps_per_epoch=train_sz//BATCH_SZ,
         ##keep the total number of steps the same despite of an increased number of workers
-        steps_per_epoch=train_sz // hvd.size(), 
+        #steps_per_epoch= train_sz // hvd.size(), 
+        steps_per_epoch= train_sz // (hvd.size()*BATCH_SZ), 
         epochs=epochs,
         callbacks=callbacks_list,
         verbose=verbose,
@@ -270,7 +272,8 @@ if __name__ == '__main__':
         validation_data=val_data,
         #validation_steps=valid_steps,
         #set this value to be 3 * num_test_iterations / number_of_workers
-        validation_steps=3 * valid_sz // hvd.size())
+        #validation_steps= 3 * valid_sz // hvd.size())
+        validation_steps = valid_steps // hvd.size())
         #initial_epoch = args.load_epoch)
     
     #y_iter = test_data[1].make_one_shot_iterator().get_next()

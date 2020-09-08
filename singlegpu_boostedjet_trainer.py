@@ -28,11 +28,11 @@ if __name__ == '__main__':
     expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")
     if len(args.name) > 0:
         expt_name = args.name
-    if not os.path.exists('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name):
-        os.mkdir('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name) 
+    if not os.path.exists('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name):
+        os.mkdir('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('/storage/local/data1/gpuscratch/ddicroce/tfrecord/x1/*')
+datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord/*')
 
 # After N batches, will output the loss and accuracy of the last batch tested
 class NBatchLogger(keras.callbacks.Callback):
@@ -176,7 +176,7 @@ if __name__ == '__main__':
     with graph.as_default():    
         # Model Callbacks
         print_step = 1000
-        checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
+        checkpoint = keras.callbacks.ModelCheckpoint('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
         batch_logger = NBatchLogger(display=print_step)
         csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
         lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)

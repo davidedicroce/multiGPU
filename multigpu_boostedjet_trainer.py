@@ -10,7 +10,7 @@ import tensorflow as tf
 from sklearn.metrics import roc_curve, auc
 from novograd import NovoGrad
 
-import nvtx.plugins.tf as nvtx_tf
+#import nvtx.plugins.tf as nvtx_tf
 
 #import Horovod
 import horovod.tensorflow.keras as hvd
@@ -47,7 +47,7 @@ if __name__ == '__main__':
         os.mkdir('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord/*')
+datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
 # only set `verbose` to `1` if this is the root worker. Otherwise, it should be zero.
 if hvd.rank() == 0:
@@ -86,11 +86,17 @@ def restart_epoch(args):
 #train_sz = 384000*2 #qg amount in paper
 #valid_sz = 12950 # qg amount in paper
 #test_sz = 69653 #qg amount in paper
-#'''
+'''
 BATCH_SZ = 32
 train_sz = 32*81250
 valid_sz = 32*12500
-test_sz = 32*25000
+test_sz  = 32*25000
+'''
+#'''
+BATCH_SZ = 32*50
+train_sz = 32*80356
+valid_sz = 32*12362
+test_sz  = 32*24725
 #'''
 '''
 BATCH_SZ = 32 * 8
@@ -98,8 +104,8 @@ train_sz = 32 * 500
 valid_sz = 32 * 100
 test_sz = 32 * 100
 '''
-valid_steps = valid_sz // BATCH_SZ
-test_steps = test_sz // BATCH_SZ
+valid_steps = valid_sz // (BATCH_SZ*hvd.size())
+test_steps  = test_sz  // (BATCH_SZ*hvd.size())
 
 
 channels = [0,1,2,3,4,5,6,7]
@@ -133,6 +139,10 @@ def x_fn(data):
 
 def y_fn(data):
     return data['y']
+
+class myCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self,epoch,logs={}):
+        print("\n Timestamp: "+str(tf.cast(tf.timestamp(),tf.float64)))
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # creates training dataset containing first data_size examples in datafile
@@ -145,7 +155,7 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
     dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=True if is_training else False)
     dataset = dataset.repeat()
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    dataset = dataset.apply(tf.data.experimental.ignore_errors())
+    #dataset = dataset.apply(tf.data.experimental.ignore_errors())
 
     return dataset
 
@@ -156,6 +166,7 @@ def get_dataset(dataset, start, end, batch_sz=32, columns=channels):
     dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=False)
     dataset = dataset.repeat()
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    #dataset = dataset.apply(tf.data.experimental.ignore_errors())
 
     return dataset
 
@@ -166,37 +177,8 @@ def test_dataset(dataset, start, end, batch_sz=32):
 
     return X,Y
 
-
-#def pin_memory(self):
-#    self.inp = self.inp.pin_memory()
-#    self.tgt = self.tgt.pin_memory()
-#    return self
-    
-if __name__ == '__main__':
-    decay = ''
-    #print(">> Input file:",datafile)
-    expt_name = '%s_%s'%(decay, expt_name)
-    for d in ['MODELS', 'METRICS']:
-        if not os.path.isdir('%s/%s'%(d, expt_name)):
-            os.makedirs('%s/%s'%(d, expt_name))
-    
-    names = datafile
-    dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
-    dataset = dataset.map(extract_fn)
-
-    #train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz, pin_memory = True)
-    train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
-
-    val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, columns=channels)
-    #test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
-
-    #from tensorflow.keras.backend import set_session
-    #config = tf.compat.v1.ConfigProto()
-    #config.gpu_options.per_process_gpu_memory_fraction = 0.3
-    #sess = tf.compat.v1.Session(config=config)
-    #set_session(sess)
-    #graph = tf.compat.v1.get_default_graph()
-
+#@nvtx_tf.ops.trace(message='Creat Resnet', domain_name='Resnet', grad_domain_name='BoostedJets')
+def create_resnet():
     # Build network
     import keras_resnet_single as networks
     resnet = networks.ResNet.build(len(channels), resblocks, [16,32], (125*granularity,125*granularity,len(channels)), granularity)
@@ -217,38 +199,60 @@ if __name__ == '__main__':
     opt = NovoGrad(learning_rate=lr_init * hvd.size())
     #Wrap the optimizer in a Horovod distributed optimizer
     opt = hvd.DistributedOptimizer(opt)
-    # uses hvd.DistributedOptimizer() to compute gradients.        
+    # uses hvd.DistributedOptimizer() to compute gradients.
 
-    #For Horovod: We specify `experimental_run_tf_function=False` to ensure TensorFlow 
+    #For Horovod: We specify `experimental_run_tf_function=False` to ensure TensorFlow
     resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'], experimental_run_tf_function = False)
     #resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
     resnet.summary()
+    return resnet
+
+#def pin_memory(self):
+#    self.inp = self.inp.pin_memory()
+#    self.tgt = self.tgt.pin_memory()
+#    return self
     
+if __name__ == '__main__':
+    decay = ''
+    #print(">> Input file:",datafile)
+    expt_name = '%s_%s'%(decay, expt_name)
+    for d in ['MODELS', 'METRICS']:
+        if not os.path.isdir('%s/%s'%(d, expt_name)):
+            os.makedirs('%s/%s'%(d, expt_name))
+    
+    ## Create a MirroredStrategy.
+    #strategy = tf.distribute.MirroredStrategy()
+    #print("Number of devices: {}".format(strategy.num_replicas_in_sync))
+    ## Open a strategy scope.
+    #with strategy.scope():
+    #    # Everything that creates variables should be under the strategy scope. In general this is only model construction & `compile()`.
+    # 
+    # Build network
+    resnet = create_resnet()
+
     #with tf.Session() as sess, graph.as_default():
     #with graph.as_default():
     #hooks = [hvd.BroadcastGlobalVariablesHook(0)]
     #with tf.train.MonitoredTrainingSession(hooks=hook) as sess, graph.as_default():
+    
     # Model Callbacks
-    print_step = 1000
+    #print_step = 1000
     #checkpoint = keras.callbacks.ModelCheckpoint('/uscms/home/ddicroce/work/QuarkGluon/CMSSW_9_4_17/src/QCD_Glu_Quark/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=1, save_best_only=False)#, save_weights_only=True)
     #batch_logger = NBatchLogger(display=print_step)
     #csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
     #lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)
     #callbacks_list=[checkpoint, csv_logger, lr_scheduler]
-
     callbacks_list = []
- 
     #callback_list.append(NBatchLogger(display=print_step))
-
-    #implement a LR warmup over `args.warmup_epochs`
+    callbacks_list.append(myCallback())
+    ##implement a LR warmup over `args.warmup_epochs`
     callbacks_list.append(hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=args.warmup_epochs, verbose=verbose))
-    #replace with the Horovod learning rate scheduler, taking care not to start until after warmup is complete
+    ##replace with the Horovod learning rate scheduler, taking care not to start until after warmup is complete
     callbacks_list.append(hvd.callbacks.LearningRateScheduleCallback(start_epoch=args.warmup_epochs, multiplier=LR_Decay))
-    #broadcast initial variable states from the first worker to all others by adding the broadcast global variables callback.
+    ##broadcast initial variable states from the first worker to all others by adding the broadcast global variables callback.
     callbacks_list.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
-    #average the metrics among workers at the end of every epoch by adding the metric average callback.
+    ##average the metrics among workers at the end of every epoch by adding the metric average callback.
     callbacks_list.append(hvd.callbacks.MetricAverageCallback())  
-
     resume_from_epoch = 0
     #checkpointing should only be done on the root worker.
     if hvd.rank() == 0:
@@ -258,22 +262,34 @@ if __name__ == '__main__':
     #broadcast `resume_from_epoch` from first process to all others
     resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
 
+    #LOADING DATA
+    names = datafile
+    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', buffer_size=100, num_parallel_reads=4)
+    dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
+    dataset = dataset.map(extract_fn)
+
+    #train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz, pin_memory = True)
+    train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
+
+    val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, columns=channels)
+    #test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
+
     history = resnet.fit(
         train_data,
         #steps_per_epoch=train_sz//BATCH_SZ,
         ##keep the total number of steps the same despite of an increased number of workers
         #steps_per_epoch= train_sz // hvd.size(), 
-        steps_per_epoch= train_sz // (hvd.size()*BATCH_SZ), 
+        steps_per_epoch= train_sz // (BATCH_SZ*hvd.size()), 
         epochs=epochs,
         callbacks=callbacks_list,
         verbose=verbose,
-        workers=4,
+        workers=hvd.size(),
         initial_epoch=resume_from_epoch,
         validation_data=val_data,
         #validation_steps=valid_steps,
         #set this value to be 3 * num_test_iterations / number_of_workers
         #validation_steps= 3 * valid_sz // hvd.size())
-        validation_steps = valid_steps // hvd.size())
+        validation_steps = valid_steps)
         #initial_epoch = args.load_epoch)
     
     #y_iter = test_data[1].make_one_shot_iterator().get_next()

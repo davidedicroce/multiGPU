@@ -93,7 +93,7 @@ valid_sz = 32*12500
 test_sz  = 32*25000
 '''
 #'''
-BATCH_SZ = 32*50
+BATCH_SZ = 32
 train_sz = 32*80356
 valid_sz = 32*12362
 test_sz  = 32*24725

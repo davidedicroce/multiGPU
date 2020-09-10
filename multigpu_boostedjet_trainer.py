@@ -23,6 +23,11 @@ for gpu in gpus:
 if gpus:
     tf.config.experimental.set_visible_devices(gpus[hvd.local_rank()], 'GPU')
 
+USE_XLA = True
+if USE_XLA:
+    tf.config.optimizer.set_jit(USE_XLA)
+    #reference url : https://www.tensorflow.org/xla
+
 import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training parameters.')
@@ -71,6 +76,8 @@ def restart_epoch(args):
 
     return epoch
 
+NUM_WORKERS = 8
+
 '''
 BATCH_SZ = 32
 train_sz = 32*81250
@@ -78,7 +85,7 @@ valid_sz = 32*12500
 test_sz  = 32*25000
 '''
 #'''
-BATCH_SZ = 32
+BATCH_SZ = 32*50
 train_sz = 32*80356
 valid_sz = 32*12362
 test_sz  = 32*24725
@@ -137,7 +144,7 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
     if is_training:
         dataset = dataset.shuffle(batch_sz * 50)
 
-    dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=True if is_training else False)
+    dataset = dataset.map(map_fn,num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=True if is_training else False)
     dataset = dataset.repeat()
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.apply(tf.data.experimental.ignore_errors())
@@ -147,8 +154,8 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
 # creates training dataset containing first data_size examples in datafile
 # - datafile: name (or list of names) of TFRecord file containing training data
 #@nvtx_tf.ops.trace(message='get_dataset', domain_name='DataLoading', grad_domain_name='BoostedJets')
-def get_dataset(dataset, start, end, batch_sz=32, columns=channels):
-    dataset = dataset.map(map_fn).batch(batch_sz, drop_remainder=False)
+def get_dataset(dataset, start, end, batch_sz=32, columns=channels):       
+    dataset = dataset.map(map_fn, num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=False)
     dataset = dataset.repeat()
     dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.apply(tf.data.experimental.ignore_errors())

@@ -10,6 +10,8 @@ import tensorflow as tf
 from sklearn.metrics import roc_curve, auc
 from novograd import NovoGrad
 
+from tensorflow.keras.mixed_precision import experimental as mixed_precision
+
 #import nvtx.plugins.tf as nvtx_tf
 
 #import Horovod
@@ -76,8 +78,6 @@ def restart_epoch(args):
 
     return epoch
 
-NUM_WORKERS = 8
-
 '''
 BATCH_SZ = 32
 train_sz = 32*81250
@@ -118,7 +118,6 @@ def extract_fn(data):
     sample = tf.io.parse_single_example(serialized=data, features=feature_description)
     return sample
 
-   
 classes = 2
 def map_fn(data):
     # reshapes X_jets, converts y to one-hot array for feeding into keras model
@@ -144,9 +143,10 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
     if is_training:
         dataset = dataset.shuffle(batch_sz * 50)
 
-    dataset = dataset.map(map_fn,num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=True if is_training else False)
-    dataset = dataset.repeat()
-    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+    dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=True if is_training else False).repeat().prefetch(tf.data.experimental.AUTOTUNE)
+    #dataset = dataset.map(map_fn,num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=True if is_training else False)
+    # dataset = dataset.repeat()
+    # dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.apply(tf.data.experimental.ignore_errors())
 
     return dataset
@@ -154,18 +154,21 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
 # creates training dataset containing first data_size examples in datafile
 # - datafile: name (or list of names) of TFRecord file containing training data
 #@nvtx_tf.ops.trace(message='get_dataset', domain_name='DataLoading', grad_domain_name='BoostedJets')
-def get_dataset(dataset, start, end, batch_sz=32, columns=channels):       
-    dataset = dataset.map(map_fn, num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=False)
-    dataset = dataset.repeat()
-    dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
+def get_dataset(dataset, start, end, batch_sz=32, columns=channels):
+    dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=False).repeat().prefetch(tf.data.experimental.AUTOTUNE)
+    #dataset = dataset.map(map_fn, num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=False)
+    #dataset = dataset.repeat()
+    #dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.apply(tf.data.experimental.ignore_errors())
 
     return dataset
 
 #@nvtx_tf.ops.trace(message='test_dataset', domain_name='DataLoading', grad_domain_name='BoostedJets')
 def test_dataset(dataset, start, end, batch_sz=32):
-    X = dataset.map(map_fn).batch(batch_sz, drop_remainder=False)
-    Y = dataset.map(y_fn).batch(end-start)
+    X = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=False)
+    #X = dataset.map(map_fn).batch(batch_sz, drop_remainder=False)
+    Y = dataset.map(y_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(end-start)
+    #Y = dataset.map(y_fn).batch(end-start)
 
     return X,Y
 
@@ -208,6 +211,9 @@ if __name__ == '__main__':
     for d in ['MODELS', 'METRICS']:
         if not os.path.isdir('%s/%s'%(d, expt_name)):
             os.makedirs('%s/%s'%(d, expt_name))
+
+    # policy = mixed_precision.Policy('mixed_float16')
+    # mixed_precision.set_policy(policy)
     
     # Build network
     resnet = create_resnet()
@@ -230,9 +236,11 @@ if __name__ == '__main__':
 
     #LOADING DATA
     names = datafile
+    dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', num_parallel_reads=tf.data.experimental.AUTOTUNE)
+    dataset = dataset.map(extract_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', buffer_size=100, num_parallel_reads=4)
-    dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
-    dataset = dataset.map(extract_fn)
+    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
+    #dataset = dataset.map(extract_fn)
 
     #train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz, pin_memory = True)
     train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)

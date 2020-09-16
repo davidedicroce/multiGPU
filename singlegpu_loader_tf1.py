@@ -16,13 +16,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
 # Path to directory containing TFRecord files
-#datafile = glob.glob('/storage/local/data1/gpuscratch/ccianfar/tfrecords/records/*')
-datafile = glob.glob('/storage/local/data1/gpuscratch/bburkle/tfrecord/*x1*')
+datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
 BATCH_SZ = 32
-train_sz = 32*1000
-valid_sz = 32*1000
-test_sz = 32*1000
+train_sz = 32*81250
+valid_sz = 32*12500
+test_sz = 32*25000
 
 '''
 BATCH_SZ = 32
@@ -126,7 +125,7 @@ if __name__ == '__main__':
 
         history = test.predict(
             train_data,
-            steps=100,
+            steps=1600,
             verbose=1,
             max_queue_size=10
         )

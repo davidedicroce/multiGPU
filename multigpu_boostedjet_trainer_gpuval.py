@@ -2,7 +2,7 @@ import numpy as np
 np.random.seed(0)
 import os, glob
 import time
-import datetime
+from datetime import datetime
 import h5py
 import tensorflow.keras as keras
 import math
@@ -29,8 +29,10 @@ USE_XLA = True
 if USE_XLA:
     tf.config.optimizer.set_jit(USE_XLA)
     #reference url : https://www.tensorflow.org/xla
+
 policy = mixed_precision.Policy('mixed_float16')
 mixed_precision.set_policy(policy)
+
 import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training parameters.')
@@ -48,14 +50,14 @@ if __name__ == '__main__':
     resblocks = args.resblocks
     epochs = args.epochs
     expt_name = 'BoostedJets-opendata_ResNet_blocks%d_x1_epochs%d'%(resblocks, epochs)
-    expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")+str(hvd.rank())
+    expt_name = expt_name + '-' + (datetime.now().strftime("%Y%m%d-%H%M%S")) + str(hvd.rank())
     if len(args.name) > 0:
         expt_name = args.name
     if not os.path.exists('MODELS/' + expt_name):
         os.mkdir('MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('../tfrecord_x1/*')
+datafile = tf.data.Dataset.list_files('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
 # only set `verbose` to `1` if this is the root worker. Otherwise, it should be zero.
 if hvd.rank() == 0:
@@ -97,6 +99,7 @@ train_sz = 32 * 500
 valid_sz = 32 * 100
 test_sz = 32 * 100
 '''
+train_steps = train_sz // (BATCH_SZ*hvd.size())
 valid_steps = valid_sz // (BATCH_SZ*hvd.size())
 test_steps  = test_sz  // (BATCH_SZ*hvd.size())
 
@@ -195,14 +198,19 @@ def create_resnet():
     #opt = keras.optimizers.SGD(lr=lr_init * hvd.size())
     opt = NovoGrad(learning_rate=lr_init * hvd.size())
     #Wrap the optimizer in a Horovod distributed optimizer -> uses hvd.DistributedOptimizer() to compute gradients.
-    #opt = tf.train.experimental.enable_mixed_precision_graph_rewrite(opt)
     opt = hvd.DistributedOptimizer(opt)
 
     #For Horovod: We specify `experimental_run_tf_function=False` to ensure TensorFlow
     resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'], experimental_run_tf_function = False)
     #resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
-    resnet.summary()
+    if hvd.rank() == 0:
+        resnet.summary()
     return resnet
+
+def create_dataset(names):
+    return tf.data.TFRecordDataset(filenames=names, compression_type='GZIP',
+            num_parallel_reads=tf.data.experimental.AUTOTUNE).map(extract_fn,
+                    num_parallel_calls=tf.data.experimental.AUTOTUNE).prefetch(tf.data.experimental.AUTOTUNE)
 
 #def pin_memory(self):
 #    self.inp = self.inp.pin_memory()
@@ -242,8 +250,7 @@ if __name__ == '__main__':
 
     #LOADING DATA
     names = datafile
-    dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', num_parallel_reads=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.map(extract_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    dataset = create_dataset(names)
     #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', buffer_size=100, num_parallel_reads=4)
     #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
     #dataset = dataset.map(extract_fn)
@@ -256,18 +263,20 @@ if __name__ == '__main__':
     for i in range(10):
         history = resnet.fit_generator(
             train_data,
-            steps_per_epoch= train_sz // (BATCH_SZ*hvd.size()), 
-            epochs=1,
+            steps_per_epoch=train_steps,
+            epochs=epochs,
             callbacks=callbacks_list,
-            verbose=verbose,
-            workers=hvd.size())
+            verbose=verbose if hvd.rank()==0 else 0,
+            workers=tf.data.experimental.AUTOTUNE
+            use_multiprocessing=True,
+            initial_epoch=resume_from_epoch)
             #initial_epoch=resume_from_epoch)
             #validation_data=val_data,
             #validation_steps = 1 * valid_steps)
             #initial_epoch = args.load_epoch)
         with tf.device('/device:gpu:1'):
             print(tf.config.list_physical_devices('GPU'),len(tf.config.list_physical_devices('GPU')))
-            loss, acc = resnet.evaluate(val_data,batch_size=BATCH_SZ, verbose=1, workers=8, steps = valid_steps)
+            loss, acc = resnet.evaluate(val_data,batch_size=BATCH_SZ, verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE, steps = valid_steps)
             print("validation loss: " +str(loss)+" validation accuracy: "+str(acc))
     #y_iter = test_data[1].make_one_shot_iterator().get_next()
     #y = sess.run(y_iter)

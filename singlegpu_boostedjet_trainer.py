@@ -32,7 +32,7 @@ if __name__ == '__main__':
         os.mkdir('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord/*')
+datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
 # After N batches, will output the loss and accuracy of the last batch tested
 class NBatchLogger(keras.callbacks.Callback):
@@ -56,7 +56,7 @@ def LR_Decay(epoch):
 #valid_sz = 12950 # qg amount in paper
 #test_sz = 69653 #qg amount in paper
 
-BATCH_SZ = 32
+BATCH_SZ = 64
 train_sz = 32*81250
 valid_sz = 32*12500
 test_sz = 32*25000
@@ -129,6 +129,10 @@ def test_dataset(dataset, start, end, batch_sz=32):
     Y = dataset.map(y_fn).batch(end-start)
 
     return X,Y
+
+class myCallback(tf.keras.callbacks.Callback):
+    def on_epoch_end(self,epoch,logs={}):
+        print("\n Timestamp: "+str(tf.cast(tf.timestamp(),tf.float64)))
     
 if __name__ == '__main__':
     decay = ''
@@ -180,7 +184,7 @@ if __name__ == '__main__':
         batch_logger = NBatchLogger(display=print_step)
         csv_logger = keras.callbacks.CSVLogger('%s.log'%(expt_name), separator=',', append=False)
         lr_scheduler = keras.callbacks.LearningRateScheduler(LR_Decay)
-        callbacks_list=[checkpoint, csv_logger, lr_scheduler]
+        callbacks_list=[myCallback(), checkpoint, csv_logger, lr_scheduler]
 
         history = resnet.fit(
             train_data,

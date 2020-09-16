@@ -2,7 +2,9 @@ import numpy as np
 np.random.seed(0)
 import os, glob
 import time
-import datetime
+from datetime import datetime
+#from packaging import version
+from timeit import default_timer as timer
 import h5py
 import tensorflow.keras as keras
 import math
@@ -30,6 +32,27 @@ if USE_XLA:
     tf.config.optimizer.set_jit(USE_XLA)
     #reference url : https://www.tensorflow.org/xla
 
+class TimingCallback(tf.keras.callbacks.Callback):
+    def __init__(self):
+        self.logs=[]
+
+    def on_epoch_begin(self, epoch, logs={}):
+        self.starttime=time()
+
+    def on_epoch_end(self, epoch, logs={}):
+        time_interval = time()-self.starttime
+        print("Time taken for epoch {} : {}".format(epoch, time_interval))
+        self.logs.append(time_interval)    
+
+# Profiling
+print("TensorFlow version: ", tf.__version__)
+
+if hvd.local_rank() == 0:
+   device_name = tf.test.gpu_device_name()
+   if not device_name:
+       raise SystemError('GPU device not found')
+       print('Found GPU at: {}'.format(device_name))
+
 import argparse
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Training parameters.')
@@ -47,14 +70,16 @@ if __name__ == '__main__':
     resblocks = args.resblocks
     epochs = args.epochs
     expt_name = 'BoostedJets-opendata_ResNet_blocks%d_x1_epochs%d'%(resblocks, epochs)
-    expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")
+    expt_name = expt_name + '-' + (datetime.now().strftime("%Y%m%d-%H%M%S")) + str(hvd.rank())
+    #expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")
     if len(args.name) > 0:
         expt_name = args.name
     if not os.path.exists('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name):
         os.mkdir('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
+datafile = tf.data.Dataset.list_files('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
+#datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
 # only set `verbose` to `1` if this is the root worker. Otherwise, it should be zero.
 if hvd.rank() == 0:
@@ -85,17 +110,18 @@ valid_sz = 32*12500
 test_sz  = 32*25000
 '''
 #'''
-BATCH_SZ = 32*50
-train_sz = 32*80356
-valid_sz = 32*12362
-test_sz  = 32*24725
+BATCH_SZ = 32*32 #32  #1600
+train_sz = 32*80000
+valid_sz = 32*3000  
+test_sz  = 32*20000
 #'''
 '''
-BATCH_SZ = 32 * 8
+BATCH_SZ = 32
 train_sz = 32 * 500
 valid_sz = 32 * 100
 test_sz = 32 * 100
 '''
+train_steps = train_sz // (BATCH_SZ*hvd.size())
 valid_steps = valid_sz // (BATCH_SZ*hvd.size())
 test_steps  = test_sz  // (BATCH_SZ*hvd.size())
 
@@ -141,13 +167,19 @@ class myCallback(tf.keras.callbacks.Callback):
 #@nvtx_tf.ops.trace(message='train_dataset', domain_name='DataLoading', grad_domain_name='BoostedJets')
 def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1,2], data_size = 32*10000):
     if is_training:
-        dataset = dataset.shuffle(batch_sz * 50)
+        dataset = dataset.shuffle(batch_sz * 2)
 
     dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=True if is_training else False).repeat().prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.map(map_fn,num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=True if is_training else False)
     # dataset = dataset.repeat()
     # dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.apply(tf.data.experimental.ignore_errors())
+
+    #dataset = dataset.shuffle(batch_sz * 2) if is_training else None
+    #dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    #dataset = dataset.repeat()
+    #dataset = dataset.batch(batch_sz, drop_remainder=True if is_training else False)
+    #dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
 
     return dataset
 
@@ -160,6 +192,8 @@ def get_dataset(dataset, start, end, batch_sz=32, columns=channels):
     #dataset = dataset.repeat()
     #dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
     #dataset = dataset.apply(tf.data.experimental.ignore_errors())
+
+    #dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=False).prefetch(tf.data.experimental.AUTOTUNE)
 
     return dataset
 
@@ -182,6 +216,7 @@ def create_resnet():
         directory = args.save_dir
         if args.save_dir == '':
             directory = expt_name
+        #model_name = glob.glob('MODELS/%s/epoch%02d-*.hdf5'%(directory, args.load_epoch))[0]
         model_name = glob.glob('MODELS/%s/epoch%02d-*.hdf5'%(directory, args.load_epoch))[0]
         #assert len(model_name) == 2
         #model_name = model_name[0].split('.hdf5')[0]+'.hdf5'
@@ -196,8 +231,15 @@ def create_resnet():
     #For Horovod: We specify `experimental_run_tf_function=False` to ensure TensorFlow
     resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'], experimental_run_tf_function = False)
     #resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
-    resnet.summary()
+    if hvd.rank() == 0:
+        resnet.summary()
+    #resnet.summary()
     return resnet
+
+def create_dataset(names):
+    return tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', 
+            num_parallel_reads=tf.data.experimental.AUTOTUNE).map(extract_fn, 
+                    num_parallel_calls=tf.data.experimental.AUTOTUNE).prefetch(tf.data.experimental.AUTOTUNE)
 
 #def pin_memory(self):
 #    self.inp = self.inp.pin_memory()
@@ -212,8 +254,8 @@ if __name__ == '__main__':
         if not os.path.isdir('%s/%s'%(d, expt_name)):
             os.makedirs('%s/%s'%(d, expt_name))
 
-    # policy = mixed_precision.Policy('mixed_float16')
-    # mixed_precision.set_policy(policy)
+    policy = mixed_precision.Policy('mixed_float16')
+    mixed_precision.set_policy(policy)
     
     # Build network
     resnet = create_resnet()
@@ -224,11 +266,19 @@ if __name__ == '__main__':
     callbacks_list.append(hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=args.warmup_epochs, verbose=verbose))
     callbacks_list.append(hvd.callbacks.LearningRateScheduleCallback(start_epoch=args.warmup_epochs, multiplier=LR_Decay))
     callbacks_list.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
-    callbacks_list.append(hvd.callbacks.MetricAverageCallback())  
+    callbacks_list.append(hvd.callbacks.MetricAverageCallback())
+
+    # Horovod: write logs on worker 0.
+    if hvd.rank() == 0:
+        logs = "METRICS/" + datetime.now().strftime("%Y%m%d-%H%M%S")
+        # tboard_callback = tf.keras.callbacks.TensorBoard(log_dir = logs, histogram_freq = 1, profile_batch = '1,1024')
+        # callbacks_list.append(tboard_callback)
+
     resume_from_epoch = 0
     #checkpointing should only be done on the root worker.
     if hvd.rank() == 0:
-        callbacks_list.append(keras.callbacks.ModelCheckpoint('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
+        #callbacks_list.append(keras.callbacks.ModelCheckpoint('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
+        callbacks_list.append(keras.callbacks.ModelCheckpoint('./MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
         callbacks_list.append(keras.callbacks.TensorBoard(args.save_dir))
     resume_from_epoch = restart_epoch(args)
     #broadcast `resume_from_epoch` from first process to all others
@@ -236,8 +286,9 @@ if __name__ == '__main__':
 
     #LOADING DATA
     names = datafile
-    dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', num_parallel_reads=tf.data.experimental.AUTOTUNE)
-    dataset = dataset.map(extract_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+    dataset = create_dataset(names)
+    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', num_parallel_reads=tf.data.experimental.AUTOTUNE)
+    #dataset = dataset.map(extract_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
     #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', buffer_size=100, num_parallel_reads=4)
     #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
     #dataset = dataset.map(extract_fn)
@@ -246,25 +297,35 @@ if __name__ == '__main__':
     train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
 
     val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, columns=channels)
-    #test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
+    test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
 
     history = resnet.fit(
         train_data,
-        steps_per_epoch= train_sz // (BATCH_SZ*hvd.size()), 
+        steps_per_epoch=train_steps,  # 80000 / hvd.size()
+        batch_size=BATCH_SZ,
         epochs=epochs,
         callbacks=callbacks_list,
-        verbose=verbose,
-        workers=hvd.size(),
+        verbose=verbose if hvd.rank()==0 else 0,
+        workers=tf.data.experimental.AUTOTUNE,
+        # workers=hvd.size()
+        use_multiprocessing=True,
         initial_epoch=resume_from_epoch,
         validation_data=val_data,
-        validation_steps = 3 * valid_steps)
+        validation_steps = valid_steps)
+        #validation_steps = 3 * valid_steps)
         #initial_epoch = args.load_epoch)
     
-    #y_iter = test_data[1].make_one_shot_iterator().get_next()
-    #y = sess.run(y_iter)
+    #from tensorflow.compat.v1.keras.backend import set_session
+    #config = tf.compat.v1.ConfigProto()
+    #config.gpu_options.per_process_gpu_memory_fraction = 0.3
+    #sess = tf.compat.v1.Session(config=config)
+    #set_session(sess)
+
+    #y_iter   = test_data[1].make_one_shot_iterator()
+    #next_ele = y_iter.get_next()
+    #y = sess.run(next_ele)
     #preds = resnet.predict(test_data[0], steps=test_steps, verbose=1)[:,1]
     #fpr, tpr, _ = roc_curve(y, preds)
     #roc_auc = auc(fpr, tpr)
     #print('Test AUC: ' + str(roc_auc))
     print('Network has finished training')
-

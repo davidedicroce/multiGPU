@@ -110,7 +110,7 @@ valid_sz = 32*12500
 test_sz  = 32*25000
 '''
 #'''
-BATCH_SZ = 32*32 #32  #1600
+BATCH_SZ = 32*16 #32  #1600
 train_sz = 32*80000
 valid_sz = 32*3000  
 test_sz  = 32*20000
@@ -315,13 +315,7 @@ if __name__ == '__main__':
         #validation_steps = 3 * valid_steps)
         #initial_epoch = args.load_epoch)
     
-    #from tensorflow.compat.v1.keras.backend import set_session
-    #config = tf.compat.v1.ConfigProto()
-    #config.gpu_options.per_process_gpu_memory_fraction = 0.3
-    #sess = tf.compat.v1.Session(config=config)
-    #set_session(sess)
-
-    #y_iter   = test_data[1].make_one_shot_iterator()
+    #y_iter   = test_data[1].iter()
     #next_ele = y_iter.get_next()
     #y = sess.run(next_ele)
     #preds = resnet.predict(test_data[0], steps=test_steps, verbose=1)[:,1]

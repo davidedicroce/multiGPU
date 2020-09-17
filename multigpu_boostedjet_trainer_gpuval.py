@@ -74,7 +74,7 @@ def LR_Decay(epoch):
 
 def restart_epoch(args):
     epoch = 0
-    for try_epoch in range(args.epochs, 0, -1):
+    for try_epoch in range(epochs, 0, -1):
         if os.path.exists(expt_name.format(epoch=try_epoch)):
             epoch = try_epoch
             break
@@ -260,14 +260,14 @@ if __name__ == '__main__':
 
     val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, batch_sz= BATCH_SZ, columns=channels)
     #test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
-    for i in range(10):
+    for i in range(epochs):
         history = resnet.fit_generator(
             train_data,
             steps_per_epoch=train_steps,
-            epochs=epochs,
+            epochs=1,
             callbacks=callbacks_list,
             verbose=verbose if hvd.rank()==0 else 0,
-            workers=tf.data.experimental.AUTOTUNE
+            workers=tf.data.experimental.AUTOTUNE,
             use_multiprocessing=True,
             initial_epoch=resume_from_epoch)
             #initial_epoch=resume_from_epoch)
@@ -276,7 +276,7 @@ if __name__ == '__main__':
             #initial_epoch = args.load_epoch)
         with tf.device('/device:gpu:1'):
             print(tf.config.list_physical_devices('GPU'),len(tf.config.list_physical_devices('GPU')))
-            loss, acc = resnet.evaluate(val_data,batch_size=BATCH_SZ, verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE, steps = valid_steps)
+            loss, acc = resnet.evaluate(val_data,batch_size=BATCH_SZ, verbose=1, workers=tf.data.experimental.AUTOTUNE, steps = valid_steps)
             print("validation loss: " +str(loss)+" validation accuracy: "+str(acc))
     #y_iter = test_data[1].make_one_shot_iterator().get_next()
     #y = sess.run(y_iter)

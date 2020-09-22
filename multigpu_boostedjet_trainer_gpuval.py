@@ -282,10 +282,12 @@ if __name__ == '__main__':
     print('Network has finished training')
     print("Running Inference")
     pred=resnet.predict(test_data[0],batch_size=BATCH_SZ,verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE)
-    binary_preds=[]
-    for i in range(len(pred)):
-        binary_preds.append(int(pred[i,1]>pred[i,0]))
-    fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))),np.array(binary_preds))
+    probs = pred[:,1]
+    fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))), np.squeeze(np.array(probs)))
+    #binary_preds=[]
+    #for i in range(len(pred)):
+    #    binary_preds.append(int(pred[i,1]>pred[i,0]))
+    #fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))),np.array(binary_preds))
     roc_auc = auc(fpr, tpr)
     print('Test AUC: ' + str(roc_auc))
     #plt.figure(1)

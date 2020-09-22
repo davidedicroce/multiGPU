@@ -18,7 +18,7 @@ if __name__ == '__main__':
 # Path to directory containing TFRecord files
 datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
-BATCH_SZ = 32
+BATCH_SZ = 64
 train_sz = 32*81250
 valid_sz = 32*12500
 test_sz = 32*25000

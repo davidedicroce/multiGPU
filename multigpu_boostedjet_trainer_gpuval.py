@@ -88,7 +88,7 @@ valid_sz = 32*12500
 test_sz  = 32*25000
 '''
 #'''
-BATCH_SZ = 32*32
+BATCH_SZ = 32*2
 train_sz = 32*80000#*80000
 valid_sz = 32*3000
 test_sz  = 32*20000
@@ -259,8 +259,9 @@ if __name__ == '__main__':
     train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
 
     val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, batch_sz= BATCH_SZ, columns=channels)
-    #test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
+    test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
     for i in range(epochs):
+        print("Epoch ", i+1)
         history = resnet.fit_generator(
             train_data,
             steps_per_epoch=train_steps,
@@ -276,13 +277,23 @@ if __name__ == '__main__':
             #initial_epoch = args.load_epoch)
         with tf.device('/device:gpu:1'):
             print(tf.config.list_physical_devices('GPU'),len(tf.config.list_physical_devices('GPU')))
-            loss, acc = resnet.evaluate(val_data,batch_size=BATCH_SZ, verbose=1, workers=tf.data.experimental.AUTOTUNE, steps = valid_steps)
+            loss, acc = resnet.evaluate(val_data,batch_size=BATCH_SZ, verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE, steps = valid_steps)
             print("validation loss: " +str(loss)+" validation accuracy: "+str(acc))
-    #y_iter = test_data[1].make_one_shot_iterator().get_next()
-    #y = sess.run(y_iter)
-    #preds = resnet.predict(test_data[0], steps=test_steps, verbose=1)[:,1]
-    #fpr, tpr, _ = roc_curve(y, preds)
-    #roc_auc = auc(fpr, tpr)
-    #print('Test AUC: ' + str(roc_auc))
     print('Network has finished training')
+    print("Running Inference")
+    pred=resnet.predict(test_data[0],batch_size=BATCH_SZ,verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE)
+    binary_preds=[]
+    for i in range(len(pred)):
+        binary_preds.append(int(pred[i,1]>pred[i,0]))
+    fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))),np.array(binary_preds))
+    roc_auc = auc(fpr, tpr)
+    print('Test AUC: ' + str(roc_auc))
+    #plt.figure(1)
+    #plt.plot([0, 1], [0, 1], 'k--')
+    #plt.plot(fpr, tpr, label='Boosted Jets (area = {:.3f})'.format(roc_auc))
+    #plt.xlabel('Background rejection')
+    #plt.ylabel('Signal classification')
+    #plt.title('ROC curve')
+    #plt.legend(loc='best')
+    #plt.show()
 

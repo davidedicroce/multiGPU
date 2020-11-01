@@ -2,14 +2,13 @@ import numpy as np
 np.random.seed(0)
 import os, glob
 import time
-from datetime import datetime
+import datetime
 import h5py
 import tensorflow.keras as keras
 import math
 import tensorflow as tf
 from sklearn.metrics import roc_curve, auc
 from novograd import NovoGrad
-
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
 
 #import nvtx.plugins.tf as nvtx_tf
@@ -50,14 +49,16 @@ if __name__ == '__main__':
     resblocks = args.resblocks
     epochs = args.epochs
     expt_name = 'BoostedJets-opendata_ResNet_blocks%d_x1_epochs%d'%(resblocks, epochs)
-    expt_name = expt_name + '-' + (datetime.now().strftime("%Y%m%d-%H%M%S")) + str(hvd.rank())
+    expt_name = expt_name + '-' +  datetime.date.strftime(datetime.datetime.now(),"%Y%m%d-%H%M%S")+str(hvd.rank())
+    #expt_name = expt_name + '-' + (datetime.now().strftime("%Y%m%d-%H%M%S")) + str(hvd.rank())
     if len(args.name) > 0:
         expt_name = args.name
     if not os.path.exists('MODELS/' + expt_name):
         os.mkdir('MODELS/' + expt_name) 
 
 # Path to directory containing TFRecord files
-datafile = tf.data.Dataset.list_files('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
+#datafile = tf.data.Dataset.list_files('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*') #give wrong ROC auc
+datafile = glob.glob('/home/u00u5ev76whwBTLvWe357/multiGPU/tfrecord_x1/*')
 
 # only set `verbose` to `1` if this is the root worker. Otherwise, it should be zero.
 if hvd.rank() == 0:
@@ -94,14 +95,14 @@ valid_sz = 32*3000
 test_sz  = 32*20000
 #'''
 '''
-BATCH_SZ = 32 * 8
-train_sz = 32 * 500
-valid_sz = 32 * 100
-test_sz = 32 * 100
+BATCH_SZ = 32 * 2
+train_sz = 32 * 10000
+valid_sz = 32 * 1000
+test_sz  = 32 * 1000
 '''
 train_steps = train_sz // (BATCH_SZ*hvd.size())
-valid_steps = valid_sz // (BATCH_SZ*hvd.size())
-test_steps  = test_sz  // (BATCH_SZ*hvd.size())
+valid_steps = valid_sz // (BATCH_SZ)
+test_steps  = test_sz  // (BATCH_SZ)
 
 
 channels = [0,1,2,3,4,5,6,7]
@@ -194,7 +195,7 @@ def create_resnet():
         #model_name = model_name[0].split('.hdf5')[0]+'.hdf5'
         print('Loading weights from file:', model_name)
         resnet.load_weights(model_name)
-    #opt = keras.optimizers.Adam(lr=lr_init, epsilon=1.e-5) # changed eps to match pytorch value
+    #opt = keras.optimizers.Adam(lr=lr_init, epsilon=1.e-8) # changed eps to match pytorch value
     #opt = keras.optimizers.SGD(lr=lr_init * hvd.size())
     opt = NovoGrad(learning_rate=lr_init * hvd.size())
     #Wrap the optimizer in a Horovod distributed optimizer -> uses hvd.DistributedOptimizer() to compute gradients.
@@ -203,8 +204,9 @@ def create_resnet():
     #For Horovod: We specify `experimental_run_tf_function=False` to ensure TensorFlow
     resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'], experimental_run_tf_function = False)
     #resnet.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
-    if hvd.rank() == 0:
-        resnet.summary()
+    resnet.summary()
+    #if hvd.rank() == 0:
+    #    resnet.summary()
     return resnet
 
 def create_dataset(names):
@@ -225,9 +227,6 @@ if __name__ == '__main__':
         if not os.path.isdir('%s/%s'%(d, expt_name)):
             os.makedirs('%s/%s'%(d, expt_name))
 
-    # policy = mixed_precision.Policy('mixed_float16')
-    # mixed_precision.set_policy(policy)
-    
     # Build network
     resnet = create_resnet()
 
@@ -241,7 +240,6 @@ if __name__ == '__main__':
     resume_from_epoch = 0
     #checkpointing should only be done on the root worker.
     if hvd.rank() == 0:
-        #callbacks_list.append(keras.callbacks.ModelCheckpoint('MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
         callbacks_list.append(keras.callbacks.ModelCheckpoint('MODELS/' + expt_name + '/epoch{epoch:02d}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
         callbacks_list.append(keras.callbacks.TensorBoard(args.save_dir))
     resume_from_epoch = restart_epoch(args)
@@ -251,15 +249,11 @@ if __name__ == '__main__':
     #LOADING DATA
     names = datafile
     dataset = create_dataset(names)
-    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', buffer_size=100, num_parallel_reads=4)
-    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
-    #dataset = dataset.map(extract_fn)
 
-    #train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz, pin_memory = True)
     train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
+    val_data   = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, batch_sz= BATCH_SZ, columns=channels)
+    test_data  = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
 
-    val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, batch_sz= BATCH_SZ, columns=channels)
-    test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
     for i in range(epochs):
         print("Epoch ", i+1)
         history = resnet.fit_generator(
@@ -267,11 +261,11 @@ if __name__ == '__main__':
             steps_per_epoch=train_steps,
             epochs=1,
             callbacks=callbacks_list,
-            verbose=verbose if hvd.rank()==0 else 0,
+            #verbose=verbose if hvd.rank()==0 else 0,
+            verbose=verbose,
             workers=tf.data.experimental.AUTOTUNE,
             use_multiprocessing=True,
             initial_epoch=resume_from_epoch)
-            #initial_epoch=resume_from_epoch)
             #validation_data=val_data,
             #validation_steps = 1 * valid_steps)
             #initial_epoch = args.load_epoch)
@@ -281,13 +275,16 @@ if __name__ == '__main__':
             print("validation loss: " +str(loss)+" validation accuracy: "+str(acc))
     print('Network has finished training')
     print("Running Inference")
-    pred=resnet.predict(test_data[0],batch_size=BATCH_SZ,verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE)
-    probs = pred[:,1]
-    fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))), np.squeeze(np.array(probs)))
-    #binary_preds=[]
-    #for i in range(len(pred)):
-    #    binary_preds.append(int(pred[i,1]>pred[i,0]))
-    #fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))),np.array(binary_preds))
+    resnet.save('resnet1.hdf5')
+    pred = resnet.predict(test_data[0],batch_size=BATCH_SZ,verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE)
+    #pred=resnet.predict(test_data[0],batch_size=BATCH_SZ,verbose=1, workers=8)
+    #probs = pred[:,1]
+    binary_preds=[]
+    for i in range(len(pred)):
+        binary_preds.append(int(pred[i,1]>pred[i,0]))
+    fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))),np.array(binary_preds))
+    #fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))), np.squeeze(np.array(probs)))
+    #print("fpr = ",fpr," , tpr = ",tpr)
     roc_auc = auc(fpr, tpr)
     print('Test AUC: ' + str(roc_auc))
     #plt.figure(1)

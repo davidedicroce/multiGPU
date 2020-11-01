@@ -110,7 +110,7 @@ valid_sz = 32*12500
 test_sz  = 32*25000
 '''
 #'''
-BATCH_SZ = 32*16 #32  #1600
+BATCH_SZ = 32*2 #32  #1600
 train_sz = 32*80000
 valid_sz = 32*3000  
 test_sz  = 32*20000
@@ -168,19 +168,7 @@ class myCallback(tf.keras.callbacks.Callback):
 def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1,2], data_size = 32*10000):
     if is_training:
         dataset = dataset.shuffle(batch_sz * 2)
-
     dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=True if is_training else False).repeat().prefetch(tf.data.experimental.AUTOTUNE)
-    #dataset = dataset.map(map_fn,num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=True if is_training else False)
-    # dataset = dataset.repeat()
-    # dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    #dataset = dataset.apply(tf.data.experimental.ignore_errors())
-
-    #dataset = dataset.shuffle(batch_sz * 2) if is_training else None
-    #dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    #dataset = dataset.repeat()
-    #dataset = dataset.batch(batch_sz, drop_remainder=True if is_training else False)
-    #dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-
     return dataset
 
 # creates training dataset containing first data_size examples in datafile
@@ -188,21 +176,13 @@ def train_dataset_generator(dataset, is_training=True, batch_sz=32, columns=[0,1
 #@nvtx_tf.ops.trace(message='get_dataset', domain_name='DataLoading', grad_domain_name='BoostedJets')
 def get_dataset(dataset, start, end, batch_sz=32, columns=channels):
     dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=False).repeat().prefetch(tf.data.experimental.AUTOTUNE)
-    #dataset = dataset.map(map_fn, num_parallel_calls=NUM_WORKERS).batch(batch_sz, drop_remainder=False)
-    #dataset = dataset.repeat()
-    #dataset = dataset.prefetch(tf.data.experimental.AUTOTUNE)
-    #dataset = dataset.apply(tf.data.experimental.ignore_errors())
-
-    #dataset = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=False).prefetch(tf.data.experimental.AUTOTUNE)
 
     return dataset
 
 #@nvtx_tf.ops.trace(message='test_dataset', domain_name='DataLoading', grad_domain_name='BoostedJets')
 def test_dataset(dataset, start, end, batch_sz=32):
     X = dataset.map(map_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(batch_sz, drop_remainder=False)
-    #X = dataset.map(map_fn).batch(batch_sz, drop_remainder=False)
     Y = dataset.map(y_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE).batch(end-start)
-    #Y = dataset.map(y_fn).batch(end-start)
 
     return X,Y
 
@@ -216,14 +196,12 @@ def create_resnet():
         directory = args.save_dir
         if args.save_dir == '':
             directory = expt_name
-        #model_name = glob.glob('MODELS/%s/epoch%02d-*.hdf5'%(directory, args.load_epoch))[0]
-        model_name = glob.glob('MODELS/%s/epoch%02d-*.hdf5'%(directory, args.load_epoch))[0]
+        model_name = glob.glob('%s/epoch%02d-*.hdf5'%(directory, args.load_epoch))[0]
         #assert len(model_name) == 2
         #model_name = model_name[0].split('.hdf5')[0]+'.hdf5'
         print('Loading weights from file:', model_name)
         resnet.load_weights(model_name)
     #opt = keras.optimizers.Adam(lr=lr_init, epsilon=1.e-5) # changed eps to match pytorch value
-    #opt = keras.optimizers.SGD(lr=lr_init * hvd.size())
     opt = NovoGrad(learning_rate=lr_init * hvd.size())
     #Wrap the optimizer in a Horovod distributed optimizer -> uses hvd.DistributedOptimizer() to compute gradients.
     opt = hvd.DistributedOptimizer(opt)
@@ -256,6 +234,13 @@ if __name__ == '__main__':
 
     policy = mixed_precision.Policy('mixed_float16')
     mixed_precision.set_policy(policy)
+
+    #LOADING DATA
+    names = datafile
+    dataset = create_dataset(names)
+    train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
+    val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, columns=channels)
+    test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
     
     # Build network
     resnet = create_resnet()
@@ -271,33 +256,15 @@ if __name__ == '__main__':
     # Horovod: write logs on worker 0.
     if hvd.rank() == 0:
         logs = "METRICS/" + datetime.now().strftime("%Y%m%d-%H%M%S")
-        # tboard_callback = tf.keras.callbacks.TensorBoard(log_dir = logs, histogram_freq = 1, profile_batch = '1,1024')
-        # callbacks_list.append(tboard_callback)
 
     resume_from_epoch = 0
     #checkpointing should only be done on the root worker.
     if hvd.rank() == 0:
-        #callbacks_list.append(keras.callbacks.ModelCheckpoint('/home/u00u5ev76whwBTLvWe357/multiGPU/MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
         callbacks_list.append(keras.callbacks.ModelCheckpoint('./MODELS/' + expt_name + '/epoch{epoch:02d}-{val_loss:.2f}.hdf5', verbose=verbose, save_best_only=False))#, save_weights_only=True)
         callbacks_list.append(keras.callbacks.TensorBoard(args.save_dir))
     resume_from_epoch = restart_epoch(args)
     #broadcast `resume_from_epoch` from first process to all others
     resume_from_epoch = hvd.broadcast(resume_from_epoch, 0)
-
-    #LOADING DATA
-    names = datafile
-    dataset = create_dataset(names)
-    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', num_parallel_reads=tf.data.experimental.AUTOTUNE)
-    #dataset = dataset.map(extract_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP', buffer_size=100, num_parallel_reads=4)
-    #dataset = tf.data.TFRecordDataset(filenames=names, compression_type='GZIP')
-    #dataset = dataset.map(extract_fn)
-
-    #train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz, pin_memory = True)
-    train_data = train_dataset_generator(dataset.take(train_sz), is_training=True, batch_sz=BATCH_SZ, columns=channels, data_size=train_sz)
-
-    val_data = get_dataset(dataset.skip(train_sz).take(valid_sz), start=train_sz, end=train_sz+valid_sz, columns=channels)
-    test_data = test_dataset(dataset.skip(train_sz+valid_sz).take(test_sz), start=train_sz+valid_sz, end=train_sz+valid_sz+test_sz)
 
     history = resnet.fit(
         train_data,
@@ -307,19 +274,24 @@ if __name__ == '__main__':
         callbacks=callbacks_list,
         verbose=verbose if hvd.rank()==0 else 0,
         workers=tf.data.experimental.AUTOTUNE,
-        # workers=hvd.size()
         use_multiprocessing=True,
         initial_epoch=resume_from_epoch,
         validation_data=val_data,
         validation_steps = valid_steps)
-        #validation_steps = 3 * valid_steps)
-        #initial_epoch = args.load_epoch)
     
-    #y_iter   = test_data[1].iter()
-    #next_ele = y_iter.get_next()
-    #y = sess.run(next_ele)
-    #preds = resnet.predict(test_data[0], steps=test_steps, verbose=1)[:,1]
-    #fpr, tpr, _ = roc_curve(y, preds)
-    #roc_auc = auc(fpr, tpr)
-    #print('Test AUC: ' + str(roc_auc))
     print('Network has finished training')
+    print("Running Inference")
+    pred=resnet.predict(test_data[0],batch_size=BATCH_SZ,verbose=verbose if hvd.rank()==0 else 0, workers=tf.data.experimental.AUTOTUNE)
+    probs = pred[:,1]
+    fpr, tpr, _ = roc_curve(np.squeeze(np.array(list(test_data[1].as_numpy_iterator()))), np.squeeze(np.array(probs)))
+    roc_auc = auc(fpr, tpr)
+    print('Test AUC: ' + str(roc_auc))
+    #plt.figure(1)
+    #plt.plot([0, 1], [0, 1], 'k--')
+    #plt.plot(fpr, tpr, label='Boosted Jets (area = {:.3f})'.format(roc_auc))
+    #plt.xlabel('Background rejection')
+    #plt.ylabel('Signal classification')
+    #plt.title('ROC curve')
+    #plt.legend(loc='best')
+    #plt.show()
+

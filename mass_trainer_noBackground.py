@@ -78,7 +78,7 @@ class ParquetDataset(Dataset):
         self.label = label
     def __getitem__(self, index):
         data = self.parquet.read_row_group(index, columns=self.cols).to_pydict()
-        data['X_jet'] = np.float32(data['X_jet'][-5])/eb_scale
+        data['X_jet'] = np.float32(data['X_jet'][0])/eb_scale
         data['am'] = transform_y(np.float32(data['am']))
         data['apt'] = np.float32(data['apt'])
         #data['w'] = np.float32(data['w'])
@@ -92,10 +92,13 @@ class ParquetDataset(Dataset):
 logger('>> Experiment: %s'%(expt_name))
 
 #directory = 'IMG/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4'
-decays = [
-    'HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4'
-    ]
-dset_train = ConcatDataset([ParquetDataset('IMG/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4/%s'%d, i) for i,d in enumerate(decays)])
+#decays = [
+#    'HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4.parquet.1'
+#    ]
+decay = 'HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4'
+decays = glob.glob('IMG/%s/*.parquet*'%decay)
+#print(">> Input files:",decays)
+dset_train = ConcatDataset([ParquetDataset('%s'%d, i) for i,d in enumerate(decays)])
 
 idxs = np.random.permutation(len(dset_train))
 idxs_train = idxs[:n_train]
@@ -111,7 +114,7 @@ val_loader = DataLoader(dataset=dset_train, batch_size=256, num_workers=10, pin_
 logger('>> N samples: Train: %d + Val: %d'%(len(idxs_train), len(idxs_val)))
 
 # Test sets
-dset_sg = ParquetDataset('IMG/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4.parquet', 1)
+dset_sg = ParquetDataset('IMG/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4.parquet.1', 1)
 sg_loader = DataLoader(dataset=dset_sg, batch_size=256, num_workers=10)
 #dset_bg = ParquetDataset('IMG/DoublePhotonPt10To100_pythia8_ReAOD_PU2017_MINIAODSIM_wrapfix.tzfixed_m0Neg%dTo0_wgts.val.parquet'%args.neg_mass, 0)
 #bg_loader = DataLoader(dataset=dset_bg, batch_size=256, num_workers=10)
@@ -119,7 +122,7 @@ sg_loader = DataLoader(dataset=dset_sg, batch_size=256, num_workers=10)
 logger('>> N test samples: sg: %d'%(len(dset_sg)))
 
 import torch_resnet_concat as networks
-resnet = networks.ResNet(2, resblocks, [16, 32])
+resnet = networks.ResNet(7, resblocks, [16, 32])
 resnet.cuda()
 optimizer = optim.Adam(resnet.parameters(), lr=lr_init)
 #lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10,20], gamma=0.5)
@@ -259,7 +262,7 @@ for e in range(epochs):
     now = time.time()
     for i, data in enumerate(train_loader):
         #X, m0, wgts = data['Xtz_aod'].cuda(), data['m'].cuda(), data['w'].cuda()
-        X, m0 = data['X_jet'].cuda(), data['m'].cuda()
+        X, m0 = data['X_jet'].cuda(), data['am'].cuda()
         iphi, ieta = data['iphi'].cuda(), data['ieta'].cuda()
         optimizer.zero_grad()
         #logits = resnet(X)

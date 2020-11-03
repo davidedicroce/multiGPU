@@ -14,18 +14,20 @@ from skimage.transform import rescale
 plt.rcParams["figure.figsize"] = (5,5)
 from torch.utils.data import *
 
+import horovod.torch as hvd
+
 import argparse
 parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('-e', '--epochs', default=90, type=int, help='Number of training epochs.')
 parser.add_argument('-l', '--lr_init', default=5.e-4, type=float, help='Initial learning rate.')
 parser.add_argument('-b', '--resblocks', default=3, type=int, help='Number of residual blocks.')
-parser.add_argument('-c', '--cuda', default=0, type=int, help='Which gpuid to use.')
+#parser.add_argument('-c', '--cuda', default=0, type=int, help='Which gpuid to use.')
 args = parser.parse_args()
 
 lr_init = args.lr_init
 resblocks = args.resblocks
 epochs = args.epochs
-os.environ["CUDA_VISIBLE_DEVICES"]=str(args.cuda)
+#os.environ["CUDA_VISIBLE_DEVICES"]=str(args.cuda)
 
 #run_logger = False
 run_logger = True 
@@ -59,7 +61,8 @@ def logger(s):
         f.write('%s\n'%str(s))
 
 def mae_loss_wgtd(pred, true, wgt=1.):
-    loss = wgt*(pred-true).abs().cuda()
+    #loss = wgt*(pred-true).abs().cuda()
+    loss = wgt*(pred-true).abs()
     #loss = wgt*(pred-true).pow(2).cuda()
     return loss.mean()
 
@@ -89,6 +92,10 @@ class ParquetDataset(Dataset):
     def __len__(self):
         return self.parquet.num_row_groups
 
+
+hvd.init()
+torch.cuda.set_device(hvd.local_rank())
+
 logger('>> Experiment: %s'%(expt_name))
 
 #directory = 'IMG/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4'
@@ -108,6 +115,7 @@ assert len(idxs_train)+len(idxs_val) == len(idxs), '%d vs. %d'%(len(idxs_train)+
 # Train
 train_sampler = sampler.SubsetRandomSampler(idxs_train)
 train_loader = DataLoader(dataset=dset_train, batch_size=256, num_workers=10, pin_memory=True, sampler=train_sampler)
+#train_loader = DALILoader(dataset=dset_train, batch_size=256, num_threads=2, devide_id=hvd.local_rank(), num_shards=hvd.size(), sampler=train_sampler)
 # Val
 val_sampler = sampler.SubsetRandomSampler(idxs_val)
 val_loader = DataLoader(dataset=dset_train, batch_size=256, num_workers=10, pin_memory=True, sampler=val_sampler)
@@ -123,8 +131,10 @@ logger('>> N test samples: sg: %d'%(len(dset_sg)))
 
 import torch_resnet_concat as networks
 resnet = networks.ResNet(7, resblocks, [16, 32])
-resnet.cuda()
+#resnet.cuda()
 optimizer = optim.Adam(resnet.parameters(), lr=lr_init)
+optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=resnet.named_parameters())
+hvd.broadcast_parameters(resnet.state_dict(), root_rank=0)
 #lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10,20], gamma=0.5)
 
 def do_eval(resnet, val_loader, mae_best, epoch, sample, tgt_label):
@@ -137,8 +147,8 @@ def do_eval(resnet, val_loader, mae_best, epoch, sample, tgt_label):
     now = time.time()
     for i, data in enumerate(val_loader):
         #X, m0, pt, wgts = data['Xtz_aod'].cuda(), data['m'].cuda(), data['pt'], data['w']
-        X, m0, pt = data['X_jet'].cuda(), data['am'].cuda(), data['apt']
-        iphi, ieta = data['iphi'].cuda(), data['ieta'].cuda()
+        X, m0, pt = data['X_jet'], data['am'], data['apt']
+        iphi, ieta = data['iphi'], data['ieta']
         #logits = resnet(X)
         logits = resnet([X, iphi, ieta])
         loss_ += mae_loss_wgtd(logits, m0).item()
@@ -245,6 +255,7 @@ def do_eval(resnet, val_loader, mae_best, epoch, sample, tgt_label):
     return np.mean(mae_)
 
 # MAIN #
+
 print_step = 100
 #print_step = 10000
 mae_best = 1.
@@ -262,8 +273,8 @@ for e in range(epochs):
     now = time.time()
     for i, data in enumerate(train_loader):
         #X, m0, wgts = data['Xtz_aod'].cuda(), data['m'].cuda(), data['w'].cuda()
-        X, m0 = data['X_jet'].cuda(), data['am'].cuda()
-        iphi, ieta = data['iphi'].cuda(), data['ieta'].cuda()
+        X, m0 = data['X_jet'], data['am']
+        iphi, ieta = data['iphi'], data['ieta']
         optimizer.zero_grad()
         #logits = resnet(X)
         logits = resnet([X, iphi, ieta])
@@ -275,7 +286,7 @@ for e in range(epochs):
         epoch_wgt += len(m0) 
         #epoch_wgt += wgts.sum()
         n_trained += 1
-        if i % print_step == 0:
+        if i % print_step == 0 and hvd.local_rank() == 0:
             logits, m0 = inv_transform(logits), inv_transform(m0)
             mae = (logits-m0).abs().mean()
             logger('%d: (%d/%d) m_pred: %s...'%(epoch, i, len(train_loader), str(np.squeeze(logits.tolist()[:5]))))

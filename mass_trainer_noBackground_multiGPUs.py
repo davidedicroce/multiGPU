@@ -6,13 +6,18 @@ import time
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+#from nvidia.dali.pipeline import Pipeline
+#import torch.cuda.amp.autocast as autocast
 import matplotlib.pyplot as plt
 plt.switch_backend('agg')
 from skimage.transform import rescale
 plt.rcParams["figure.figsize"] = (5,5)
 from torch.utils.data import *
+
+from sampler import DistributedTrainSampler
 
 import horovod.torch as hvd
 
@@ -21,7 +26,9 @@ parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('-e', '--epochs', default=90, type=int, help='Number of training epochs.')
 parser.add_argument('-l', '--lr_init', default=5.e-4, type=float, help='Initial learning rate.')
 parser.add_argument('-b', '--resblocks', default=3, type=int, help='Number of residual blocks.')
-#parser.add_argument('-c', '--cuda', default=0, type=int, help='Which gpuid to use.')
+parser.add_argument('-a', '--load_epoch', default=0, type=int, help='Which epoch to start training from')
+parser.add_argument('-c', '--cuda', default=0, type=int, help='Which gpuid to use.')
+parser.add_argument('--fp16-allreduce', action='store_true', default=False, help='use fp16 compression during allreduce')
 args = parser.parse_args()
 
 lr_init = args.lr_init
@@ -56,9 +63,10 @@ if run_logger:
 
 def logger(s):
     global f, run_logger
-    print(s)
-    if run_logger:
-        f.write('%s\n'%str(s))
+    if hvd.local_rank() == 0:
+        print(s)
+        if run_logger:
+            f.write('%s\n'%str(s))
 
 def mae_loss_wgtd(pred, true, wgt=1.):
     #loss = wgt*(pred-true).abs().cuda()
@@ -71,6 +79,11 @@ def transform_y(y):
 
 def inv_transform(y):
     return y*m0_scale
+
+def metric_average(val, name):
+    tensor = torch.tensor(val)
+    avg_tensor = hvd.allreduce(tensor, name=name)
+    return avg_tensor.item()
 
 class ParquetDataset(Dataset):
     def __init__(self, filename, label):
@@ -94,7 +107,17 @@ class ParquetDataset(Dataset):
 
 
 hvd.init()
-torch.cuda.set_device(hvd.local_rank())
+if torch.cuda.is_available():
+    torch.cuda.set_device(hvd.local_rank())
+
+if hvd.rank() == 0:
+    verbose = 1
+else:
+    verbose = 0
+
+torch.backends.cudnn.benchmark = True
+
+BATCH_SIZE = 64*4
 
 logger('>> Experiment: %s'%(expt_name))
 
@@ -104,7 +127,7 @@ logger('>> Experiment: %s'%(expt_name))
 #    ]
 decay = 'HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4'
 decays = glob.glob('IMG/%s/*.parquet*'%decay)
-#print(">> Input files:",decays)
+#logger(">> Input files:",decays)
 dset_train = ConcatDataset([ParquetDataset('%s'%d, i) for i,d in enumerate(decays)])
 
 idxs = np.random.permutation(len(dset_train))
@@ -113,28 +136,52 @@ idxs_val = idxs[n_train:]
 np.savez('MODELS/%s/idxs_train+val.npz'%(expt_name), idxs_train=idxs_train, idxs_val=idxs_val)
 assert len(idxs_train)+len(idxs_val) == len(idxs), '%d vs. %d'%(len(idxs_train)+len(idxs_val), len(idxs))
 # Train
-train_sampler = sampler.SubsetRandomSampler(idxs_train)
-train_loader = DataLoader(dataset=dset_train, batch_size=256, num_workers=10, pin_memory=True, sampler=train_sampler)
-#train_loader = DALILoader(dataset=dset_train, batch_size=256, num_threads=2, devide_id=hvd.local_rank(), num_shards=hvd.size(), sampler=train_sampler)
+train_sampler_ = sampler.SubsetRandomSampler(idxs_train)
+train_sampler = DistributedTrainSampler(train_sampler_, num_replicas=hvd.size(), rank=hvd.rank())
+#train_sampler = torch.utils.data.distributed.DistributedSampler(dset_train, num_replicas=hvd.size(), rank=hvd.rank())
+train_loader  = DataLoader(dataset=dset_train, batch_size=BATCH_SIZE, num_workers=10, pin_memory=True, sampler=train_sampler)
+#for num_workers in range(0, 10, 1):
+#    training_dataloader = DataLoader(dataset=dset_train, batch_size=BATCH_SIZE, num_workers=num_workers, pin_memory=True)
+#    start = time.time()
+#    for epoch in range(1, 5):
+#        for i, data in enumerate(training_dataloader, 0):
+#            pass
+#    end = time.time()
+#    logger("Finish with:{} seconds, num_workers={}".format(end - start, num_workers))
+#train_loader = DALILoader(dataset=dset_train, batch_size=BATCH_SIZE, num_threads=2, devide_id=hvd.local_rank(), num_shards=hvd.size(), sampler=train_sampler)
+
 # Val
 val_sampler = sampler.SubsetRandomSampler(idxs_val)
-val_loader = DataLoader(dataset=dset_train, batch_size=256, num_workers=10, pin_memory=True, sampler=val_sampler)
+val_loader = DataLoader(dataset=dset_train, batch_size=BATCH_SIZE, num_workers=10, pin_memory=True, sampler=val_sampler)
 logger('>> N samples: Train: %d + Val: %d'%(len(idxs_train), len(idxs_val)))
 
 # Test sets
 dset_sg = ParquetDataset('IMG/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4/HToTauTau_m3p6To15_pT0To200_ctau0To3_eta0To1p4.parquet.1', 1)
-sg_loader = DataLoader(dataset=dset_sg, batch_size=256, num_workers=10)
+sg_loader = DataLoader(dataset=dset_sg, batch_size=BATCH_SIZE, num_workers=10)
 #dset_bg = ParquetDataset('IMG/DoublePhotonPt10To100_pythia8_ReAOD_PU2017_MINIAODSIM_wrapfix.tzfixed_m0Neg%dTo0_wgts.val.parquet'%args.neg_mass, 0)
-#bg_loader = DataLoader(dataset=dset_bg, batch_size=256, num_workers=10)
+#bg_loader = DataLoader(dataset=dset_bg, batch_size=BATCH_SIZE, num_workers=10)
 #logger('>> N test samples: sg: %d + bg: %d'%(len(dset_sg), len(dset_bg)))
 logger('>> N test samples: sg: %d'%(len(dset_sg)))
 
 import torch_resnet_concat as networks
 resnet = networks.ResNet(7, resblocks, [16, 32])
-#resnet.cuda()
+#lr_scaler = hvd.size() if not args.use_adasum else 1
 optimizer = optim.Adam(resnet.parameters(), lr=lr_init)
-optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=resnet.named_parameters())
+if args.load_epoch != 0:
+    model_name = 'MODELS/%s/model_epoch%d_val.pkl'%(expt_name, args.load_epoch)
+    if hvd.local_rank() == 0: logger('Loading weights from file:', model_name)
+    checkpoint = torch.load(model_name)
+    resnet.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    epoch = checkpoint['epoch']
+    loss = checkpoint['loss']
+    resnet.load_weights(model_name)
+#resnet.cuda()
+# Horovod: (optional) compression algorithm
+compression = hvd.Compression.fp16 if args.fp16_allreduce else hvd.Compression.none
+optimizer = hvd.DistributedOptimizer(optimizer, named_parameters=resnet.named_parameters(),compression=compression)
 hvd.broadcast_parameters(resnet.state_dict(), root_rank=0)
+hvd.broadcast_optimizer_state(optimizer, root_rank=0)
 #lr_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[10,20], gamma=0.5)
 
 def do_eval(resnet, val_loader, mae_best, epoch, sample, tgt_label):
@@ -145,6 +192,7 @@ def do_eval(resnet, val_loader, mae_best, epoch, sample, tgt_label):
     iphi_, ieta_ = [], []
     label_ = []
     now = time.time()
+
     for i, data in enumerate(val_loader):
         #X, m0, pt, wgts = data['Xtz_aod'].cuda(), data['m'].cuda(), data['pt'], data['w']
         X, m0, pt = data['X_jet'], data['am'], data['apt']
@@ -167,96 +215,40 @@ def do_eval(resnet, val_loader, mae_best, epoch, sample, tgt_label):
         label_.append(data['label'].tolist())
 
     now = time.time() - now
-    #m_true_ = np.concatenate(m_true_)
-    #m_pred_ = np.concatenate(m_pred_)
-    #mae_ = np.array(mae_)
-    #pt_ = np.concatenate(pt_)
-    #wgts_ = np.concatenate(wgts_)
-    #iphi_ = np.concatenate(iphi_)
-    #ieta_ = np.concatenate(ieta_)
-    label_ = np.concatenate(label_)
+    label_  = np.concatenate(label_)
     m_true_ = np.concatenate(m_true_)[label_==tgt_label]
     m_pred_ = np.concatenate(m_pred_)[label_==tgt_label]
-    #mae_ = np.array(mae_)[label_==tgt_label]
-    mae_ = np.concatenate(mae_)[label_==tgt_label]
-    pt_ = np.concatenate(pt_)[label_==tgt_label]
-    #wgts_ = np.concatenate(wgts_)[label_==tgt_label]
-    iphi_ = np.concatenate(iphi_)[label_==tgt_label]
-    ieta_ = np.concatenate(ieta_)[label_==tgt_label]
+    mae_    = np.concatenate(mae_)[label_==tgt_label]
+    pt_     = np.concatenate(pt_)[label_==tgt_label]
+    #wgts_   = np.concatenate(wgts_)[label_==tgt_label]
+    iphi_   = np.concatenate(iphi_)[label_==tgt_label]
+    ieta_   = np.concatenate(ieta_)[label_==tgt_label]
 
-    logger('%d: Val m_pred: %s...'%(epoch, str(np.squeeze(m_pred_[:5]))))
-    logger('%d: Val m_true: %s...'%(epoch, str(np.squeeze(m_true_[:5]))))
-    logger('%d: Val time:%.2fs in %d steps for N=%d'%(epoch, now, len(val_loader), len(m_true_)))
-    logger('%d: Val loss:%f, mae:%f'%(epoch, loss_/len(val_loader), np.mean(mae_)))
+    loss_ /= len(val_loader)
+    # Horovod: average metric values across workers.
+    loss_ = metric_average(loss_, 'avg_loss')
 
-    score_str = 'epoch%d_%s_mae%.4f'%(epoch, sample, np.mean(mae_))
+    if hvd.local_rank() == 0 :
+        logger('%d: Val m_pred: %s...'%(epoch, str(np.squeeze(m_pred_[:5]))))
+        logger('%d: Val m_true: %s...'%(epoch, str(np.squeeze(m_true_[:5]))))
+        logger('%d: Val time:%.2fs in %d steps for N=%d'%(epoch, now, len(val_loader), len(m_true_)))
+        logger('%d: Val loss:%f, mae:%f'%(epoch, loss_, np.mean(mae_)))
+        
+        epoch_str = 'epoch%d_%s'%(epoch, sample)
+        #score_str = 'epoch%d_%s_mae%.4f'%(epoch, sample, np.mean(mae_))
 
-    #if 'pseduscalar' in sample:
-    #    # Check 2D m_true v m_pred
-    #    logger('%d: Val m_true vs. m_pred, [0,1600,200] MeV:'%(epoch))
-    #    sct = np.histogram2d(np.squeeze(m_true_), np.squeeze(m_pred_), bins=mass_bins)[0]
-    #    logger(np.uint(np.fliplr(sct).T))
-    #    # Extended version
-    #    plt.plot(m_true_, m_pred_, ".", color='black', alpha=0.1, label='MAE = %.3f GeV'%np.mean(mae_))
-    #    plt.xlabel(r'$\mathrm{m_{label}}$', size=16)
-    #    plt.ylabel(r'$\mathrm{m_{pred}}$', size=16)
-    #    plt.plot((3.6, 15), (1.2, 1.2), color='r', linestyle='--', alpha=0.5)
-    #    plt.plot((1.2, 1.2), (-0.4, 1.6), color='r', linestyle='--', alpha=0.5)
-    #    plt.plot((3.6, 15), (0., 0.), color='r', linestyle='--', alpha=0.5)
-    #    plt.plot((3.6, 15), (3.6, 15), color='r', linestyle='--', alpha=0.5)
-    #    plt.xlim(3.6, 15)
-    #    plt.ylim(-0.4, 1.6)
-    #    plt.legend(loc='upper left')
-    #    plt.savefig('PLOTS/%s/mtruevpred_%s.png'%(expt_name, score_str), bbox_inches='tight')
-    #    plt.close()
-    #    # Truncated version
-    #    plt.plot(m_true_, m_pred_, ".", color='black', alpha=0.125, label='MAE = %.3f GeV'%np.mean(mae_))
-    #    plt.xlabel(r'$\mathrm{m_{label}}$', size=16)
-    #    plt.ylabel(r'$\mathrm{m_{pred}}$', size=16)
-    #    plt.plot((3.6, 15), (3.6, 15), color='r', linestyle='--', alpha=0.5)
-    #    plt.xlim(3.6, 15)
-    #    plt.ylim(3.6, 15)
-    #    plt.legend(loc='upper left')
-    #    plt.savefig('PLOTS/%s/mtruevpred_%s_trunc.png'%(expt_name, score_str), bbox_inches='tight')
-    #    plt.close()
+        if run_logger:
 
-    ## Check 1D m_pred
-    #hst = np.histogram(np.squeeze(m_pred_), bins=mass_bins)[0]
-    #logger('%d: Val m_pred, [0,1600,200] MeV: %s'%(epoch, str(np.uint(hst))))
-    #mlow = hst[0]
-    #mrms = np.std(hst)
-    #logger('%d: Val m_pred, [0,1600,200] MeV: low:%d, rms: %f'%(epoch, mlow, mrms))
-    #norm = 1.*len(m_pred_)/len(m0)
-    #plt.hist((m_true_ if 'pseduscalar' in sample else np.zeros_like(m_true_)),\
-    #        range=(3.6,15), bins=20, histtype='step', label=r'$\mathrm{m_{true}}$', linestyle='--', color='grey', alpha=0.6)
-    #plt.hist(m_pred_, range=(3.6,15), bins=20, histtype='step', label=r'$\mathrm{m_{pred}}$', linestyle='--', color='C0', alpha=0.6)
-    #plt.hist((m_true_ if 'pseduscalar' in sample else np.zeros_like(m_true_)),\
-    #        #range=(3.6,15), bins=20, histtype='step', label=r'$\mathrm{m_{true,w}}$', color='grey', weights=wgts_*norm)
-    #        range=(3.6,15), bins=20, histtype='step', label=r'$\mathrm{m_{true,w}}$', color='grey', weights=norm)
-    ##plt.hist(m_pred_, range=(3.6,15), bins=20, histtype='step', label=r'$\mathrm{m_{pred,w}}$', color='C0', weights=wgts_*norm)
-    #plt.hist(m_pred_, range=(3.6,15), bins=20, histtype='step', label=r'$\mathrm{m_{pred,w}}$', color='C0', weights=norm)
-    #plt.xlim(3.6,15)
-    #plt.xlabel(r'$\mathrm{m}$', size=16)
-    #if 'pseduscalar' in sample:
-    #    plt.legend(loc='lower center')
-    #else:
-    #    plt.legend(loc='upper right')
-    #plt.show()
-    #plt.savefig('PLOTS/%s/mpred_%s.png'%(expt_name, score_str), bbox_inches='tight')
-    #plt.close()
-
-    if run_logger:
-
-        if 'pseduscalar' in sample and 'val' in sample:
-            filename = 'MODELS/%s/model_%s.pkl'%(expt_name, score_str.replace('pseduscalar_',''))
-            model_dict = {'model': resnet.state_dict(), 'optim': optimizer.state_dict()}
-            torch.save(model_dict, filename)
+            if 'pseduscalar' in sample and 'val' in sample:
+                filename = 'MODELS/%s/model_%s.pkl'%(expt_name, epoch_str.replace('_pseduscalar',''))
+                model_dict = {'model': resnet.state_dict(), 'optim': optimizer.state_dict()}
+                torch.save(model_dict, filename)
 
     return np.mean(mae_)
 
 # MAIN #
 
-print_step = 100
+print_step = 10
 #print_step = 10000
 mae_best = 1.
 logger(">> Training <<<<<<<<")
@@ -276,6 +268,7 @@ for e in range(epochs):
         X, m0 = data['X_jet'], data['am']
         iphi, ieta = data['iphi'], data['ieta']
         optimizer.zero_grad()
+        #with autocast():
         #logits = resnet(X)
         logits = resnet([X, iphi, ieta])
         #loss = mae_loss_wgtd(logits, m0, wgt=wgts)
